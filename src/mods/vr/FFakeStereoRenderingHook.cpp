@@ -3034,6 +3034,20 @@ bool FFakeStereoRenderingHook::is_in_viewport_client_draw() const {
     return m_in_viewport_client_draw && GameThreadWorker::get().is_same_thread();
 }
 
+// MSVC disallows __try/__except directly inside a function that also has objects
+// requiring unwinding (sceneview_constructor below has a scoped_lock and other
+// locals in scope, error C2712) - so this is isolated in its own small helper with
+// no other unwindable locals, same requirement that's already satisfied by the
+// existing __try/__except usage elsewhere in this file being inside a lambda.
+static bool try_set_ghosting_fix_scene_state(sdk::FSceneViewInitOptions* init_options, sdk::FSceneViewStateInterface* scene_state) {
+    __try {
+        init_options->set_scene_state(scene_state);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 // FSceneView constructor hook
 sdk::FSceneView* FFakeStereoRenderingHook::sceneview_constructor(sdk::FSceneView* view, sdk::FSceneViewInitOptions* init_options, void* a3, void* a4) {
     SPDLOG_INFO_ONCE("Called FSceneView constructor for the first time");
@@ -3188,11 +3202,21 @@ sdk::FSceneView* FFakeStereoRenderingHook::sceneview_constructor(sdk::FSceneView
 
     bool new_scene_state_inserted_this_frame = false;
 
-    if (init_options_scene_state != nullptr && !g_hook->m_sceneview_data.known_scene_states.contains(init_options_scene_state)) {
-        SPDLOG_INFO("Inserting new scene state {:x}", (uintptr_t)init_options_scene_state);
-        known_scene_states.insert(init_options_scene_state);
-        new_scene_state_inserted_this_frame = true;
-    } else if (init_options_scene_state == nullptr) {
+    if (init_options_scene_state != nullptr) {
+        auto known_it = known_scene_states.find(init_options_scene_state);
+
+        if (known_it == known_scene_states.end()) {
+            SPDLOG_INFO("Inserting new scene state {:x}", (uintptr_t)init_options_scene_state);
+            known_scene_states[init_options_scene_state] = g_frame_count;
+            new_scene_state_inserted_this_frame = true;
+        } else {
+            // Refresh the recency timestamp for every scene state we actually see, not
+            // just newly-discovered ones - this is what lets the "find the other eye's
+            // state" search below restrict itself to genuinely live scene states (see
+            // known_scene_states comment in FFakeStereoRenderingHook.hpp).
+            known_it->second = g_frame_count;
+        }
+    } else {
         SPDLOG_ERROR_ONCE("Scene state passed to FSceneView constructor is null");
 
         if ((int32_t)init_options_stereo_pass < 0) {
@@ -3201,11 +3225,17 @@ sdk::FSceneView* FFakeStereoRenderingHook::sceneview_constructor(sdk::FSceneView
     }
 
     if (init_options_scene_state != nullptr && !new_scene_state_inserted_this_frame && vr->is_ghosting_fix_enabled() && !known_scene_states.empty() && vr->is_using_afr() && true_index == 1) {
+        // Ruled out (2026-07-24): tested with this call removed - hang persisted
+        // identically, so this specific line is NOT the cause. Restored.
         init_options->set_stereo_pass(EStereoscopicPass::eSSP_PRIMARY);
         auto& eye_pair = g_hook->m_sceneview_data.m_ghosting_fix_pair;
         if (eye_pair.eye_state[0] == init_options_scene_state) {
             eye_pair.last_seen_frame = g_frame_count;
-        } else if (eye_pair.eye_state == nullptr || g_frame_count - eye_pair.last_seen_frame > 90) {
+        // Fix: this used to compare the eye_state ARRAY itself to nullptr (always
+        // false due to array-to-pointer decay), so this reset branch never actually
+        // fired on "never initialized" - it silently relied on the 90-frame staleness
+        // check alone. Now correctly checks the first slot's value.
+        } else if (eye_pair.eye_state[0] == nullptr || g_frame_count - eye_pair.last_seen_frame > 90) {
             eye_pair.eye_state[0] = init_options_scene_state;
             eye_pair.eye_state[1] = nullptr;
         }
@@ -3213,12 +3243,40 @@ sdk::FSceneView* FFakeStereoRenderingHook::sceneview_constructor(sdk::FSceneView
             init_options->set_scene_state(eye_pair.eye_state[1]);
         }
         if (eye_pair.eye_state[0] == init_options_scene_state && !eye_pair.eye_state[1]) {
-            // Set the scene state to the one that isn't the current one
-            for (auto scene_state : known_scene_states) {
-                if (scene_state != init_options_scene_state) {
+            // Set the scene state to the one that isn't the current one. Fix: only
+            // consider entries seen recently (same 90-frame staleness window used for
+            // eye_pair itself above) - previously this searched the ENTIRE
+            // known_scene_states history with no recency bound at all, which could (and,
+            // per the reported crash-after-~a-minute symptom, very plausibly did) return
+            // a pointer to a scene state the engine has since destroyed - a
+            // use-after-free once that pointer gets dereferenced downstream.
+            //
+            // An earlier version of this fix used a much tighter 2-frame window, which
+            // caused a regression: the search would almost never find a match, so
+            // eye_state[1] never got populated, while set_stereo_pass(eSSP_PRIMARY) above
+            // still unconditionally ran - leaving the view half-configured (marked
+            // primary, but never redirected to share the other eye's scene state), which
+            // the game's native render pipeline apparently doesn't handle gracefully
+            // (observed as a RenderThread hang / GameThread timeout, not a crash). 90
+            // frames matches the existing staleness philosophy already used for
+            // eye_pair.last_seen_frame, so this should almost never exclude a
+            // legitimately-active state under normal play, while still excluding
+            // genuinely long-dead ones.
+            for (auto& [scene_state, last_seen_frame] : known_scene_states) {
+                if (scene_state != init_options_scene_state && g_frame_count - last_seen_frame <= 90) {
+                    // Defense in depth: set_scene_state() itself almost certainly just
+                    // stores the pointer value (a plain assignment can't fault), so this
+                    // can't catch a fault that happens later when the stored pointer is
+                    // actually dereferenced downstream - the real protection is the
+                    // recency filter above. This just guards against the (less likely)
+                    // possibility that set_scene_state or something it calls touches the
+                    // pointer directly.
                     SPDLOG_INFO_ONCE("Setting scene state to {:x}", (uintptr_t)scene_state);
-                    init_options->set_scene_state(scene_state);
-                    eye_pair.eye_state[1] = scene_state;
+                    if (try_set_ghosting_fix_scene_state(init_options, scene_state)) {
+                        eye_pair.eye_state[1] = scene_state;
+                    } else {
+                        SPDLOG_ERROR_ONCE("Ghosting fix: set_scene_state faulted on a stale scene state pointer, skipping");
+                    }
                     break;
                 }
             }
@@ -3278,6 +3336,18 @@ void FFakeStereoRenderingHook::setup_viewpoint(ISceneViewExtension* extension, v
     if (!vr->is_ghosting_fix_enabled() || g_hook->m_fixed_localplayer_view_count) {
         return;
     }
+
+    // ISOLATION TEST (2026-07-24): this entire "fix localplayer view count"
+    // mechanism dynamically finds the caller of ISceneViewExtension::SetupViewPoint
+    // at runtime via a return-address walk (utility::find_virtual_function_start)
+    // and installs a brand-new inline hook on whatever it finds - separate, riskier
+    // machinery than the scene-state-sharing logic already tested (and ruled out,
+    // along with set_stereo_pass) in sceneview_constructor. If Survivor's compiled
+    // binary lays this caller out differently than Fallen Order's, this heuristic
+    // could find the wrong address or install a broken hook. Early-returning here to
+    // test whether skipping this mechanism entirely avoids the RenderThread hang.
+    SPDLOG_WARN_ONCE("Ghosting fix: localplayer view count fix SKIPPED for isolation testing");
+    return;
 
     // Using this as a way to get to the localplayer
     static bool attempted_hook{false};

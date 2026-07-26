@@ -645,6 +645,10 @@ public:
         return m_ghosting_fix->value();
     }
 
+    bool is_afw_prefer_native_buffers_enabled() const {
+        return m_afw_prefer_native_buffers->value();
+    }
+
     auto& get_fake_stereo_hook() {
         return m_fake_stereo_hook;
     }
@@ -1060,6 +1064,22 @@ private:
     const ModSlider::Ptr m_depth_scale{ ModSlider::create(generate_name("DepthScale"), 0.01f, 1.0f, 1.0f) };
 
     const ModToggle::Ptr m_ghosting_fix{ ModToggle::create(generate_name("GhostingFix"), true) };
+    // AFW normally sources its depth/motion-vector buffers by hooking DLSS's own
+    // NVSDK_NGX_D3D12_EvaluateFeature call (see hk_NVSDK_NGX_D3D12_EvaluateFeature in
+    // VR.cpp) - this only works because DLSS being active is what makes the engine
+    // compute+pass these buffers through that specific hookable call at all. A native,
+    // DLSS-independent fallback already existed for depth (D3D12Component.cpp queries
+    // the render target pool for "SceneDepthZ" directly) but not for motion vectors -
+    // this toggle, combined with the added "SceneVelocity" fallback, lets AFW source
+    // BOTH buffers natively and skip depending on the DLSS hook firing at all, per
+    // PureDark's suggested workaround for Jedi Survivor's longstanding Ghosting Fix
+    // hang (2026-07-24 conversation - Survivor's DLSS/NGX interaction is suspected to
+    // be the underlying incompatibility, not something specific to the C++ scene-state
+    // fix attempted earlier tonight). DLSS itself keeps running normally for the game's
+    // own presented image either way - only AFW's own input sourcing changes. Expected
+    // tradeoff (per PureDark): AFW's reprojected frame loses DLSS's temporal AA benefit
+    // since it's no longer built from DLSS-processed buffers.
+    const ModToggle::Ptr m_afw_prefer_native_buffers{ ModToggle::create(generate_name("AFWPreferNativeBuffers"), false) };
     const ModToggle::Ptr m_native_stereo_fix{ ModToggle::create(generate_name("NativeStereoFix"), false) };
     const ModToggle::Ptr m_native_stereo_fix_same_pass{ ModToggle::create(generate_name("NativeStereoFixSamePass"), true) };
 
@@ -1178,6 +1198,7 @@ public:
             *m_custom_z_near,
             *m_custom_z_near_enabled,
             *m_ghosting_fix,
+            *m_afw_prefer_native_buffers,
             *m_native_stereo_fix,
             *m_native_stereo_fix_same_pass,
             *m_splitscreen_compatibility_mode,

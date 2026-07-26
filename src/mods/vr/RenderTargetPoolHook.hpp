@@ -1,6 +1,7 @@
 #pragma once
 
 #include <mutex>
+#include <vector>
 #include <wrl.h>
 
 #include "../../Mod.hpp"
@@ -30,6 +31,17 @@ public:
         }
 
         return nullptr;
+    }
+
+    // Diagnostic: lists every render target name UEVR has actually observed going
+    // through the pool. Added to confirm/correct the "SceneVelocity" name guess used
+    // for AFW's native motion-vector fallback (Respawn's engine fork has renamed
+    // things elsewhere, e.g. the RsActor-prefixed classes found in Jedi Survivor's
+    // pawn hierarchy) - if the expected name isn't present, this list shows what
+    // actually is.
+    std::vector<std::wstring> get_seen_render_target_names() {
+        std::scoped_lock _{m_mutex};
+        return std::vector<std::wstring>(m_seen_names.begin(), m_seen_names.end());
     }
 
     template<typename T>

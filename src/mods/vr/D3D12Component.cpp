@@ -447,11 +447,59 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
     vr->finalSize[0] = eye_width;
     vr->finalSize[1] = eye_height;
 
-    if (!vr->rawDepthTex) {
+    // AFW normally only reaches this fallback for depth when rawDepthTex hasn't been
+    // populated by the DLSS hook yet (hk_NVSDK_NGX_D3D12_EvaluateFeature in VR.cpp).
+    // is_afw_prefer_native_buffers_enabled() forces this native path to take over
+    // instead - see the toggle's declaration in VR.hpp for the full rationale
+    // (PureDark's suggested Jedi Survivor workaround).
+    //
+    // Throttled to once every 30 frames (~0.5s) rather than every single frame - the
+    // underlying pooled resource rarely actually changes frame-to-frame in steady
+    // state (UE4 reuses the same allocation for a given pooled name), and
+    // get_texture()/get_seen_render_target_names() both take RenderTargetPoolHook's
+    // internal mutex, which the pool's own frame-by-frame registration hook
+    // (find_free_element_hook) also needs - querying every single frame indefinitely
+    // adds continuous extra lock pressure on a hot path that wasn't there before this
+    // toggle existed, which is a plausible contributor to a hang on its own,
+    // independent of whether the underlying DLSS-hook theory is even correct.
+    static uint32_t native_buffer_refresh_frame_counter = 0;
+    const bool should_refresh_native_buffers =
+        !vr->rawDepthTex || !vr->rawMotionVectorsTex ||
+        (vr->is_afw_prefer_native_buffers_enabled() && (native_buffer_refresh_frame_counter++ % 30 == 0));
+
+    if (should_refresh_native_buffers) {
         auto& rt_pool = vr->get_render_target_pool_hook();
-        scene_depth_tex = rt_pool->get_texture<ID3D12Resource>(L"SceneDepthZ");
-        if (scene_depth_tex)
-            vr->rawDepthTex = scene_depth_tex.Get();
+
+        if (!vr->rawDepthTex || vr->is_afw_prefer_native_buffers_enabled()) {
+            scene_depth_tex = rt_pool->get_texture<ID3D12Resource>(L"SceneDepthZ");
+            if (scene_depth_tex)
+                vr->rawDepthTex = scene_depth_tex.Get();
+        }
+
+        // Motion vectors previously had NO native fallback at all - rawMotionVectorsTex
+        // was only ever populated by the DLSS hook, meaning AFW's motion-vector input
+        // was always dependent on DLSS being active and successfully hooked.
+        // "SceneVelocity" is UE4's standard render target pool name for the native
+        // velocity buffer, mirroring "SceneDepthZ" above exactly.
+        if (!vr->rawMotionVectorsTex || vr->is_afw_prefer_native_buffers_enabled()) {
+            auto scene_velocity_tex = rt_pool->get_texture<ID3D12Resource>(L"SceneVelocity");
+            if (scene_velocity_tex) {
+                vr->rawMotionVectorsTex = scene_velocity_tex.Get();
+            } else if (vr->is_afw_prefer_native_buffers_enabled()) {
+                // "SceneVelocity" wasn't found under that exact name - dump every render
+                // target name actually seen so far so the real one can be identified
+                // instead of guessing again blind.
+                static bool logged_once = false;
+                if (!logged_once) {
+                    logged_once = true;
+                    std::string names_joined;
+                    for (const auto& name : rt_pool->get_seen_render_target_names()) {
+                        names_joined += utility::narrow(name) + " | ";
+                    }
+                    SPDLOG_WARN("AFW: \"SceneVelocity\" not found in render target pool. Seen names: {}", names_joined);
+                }
+            }
+        }
     }
 
     auto backbuffer_index = swapchain->GetCurrentBackBufferIndex();

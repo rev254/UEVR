@@ -456,7 +456,17 @@ private:
     struct {
         std::recursive_mutex mtx{};
         safetyhook::InlineHook constructor_hook{};
-        std::unordered_set<sdk::FSceneViewStateInterface*> known_scene_states;
+        // Maps each seen scene state to the frame it was last observed on. Previously
+        // this was a plain unordered_set with entries that were NEVER removed except
+        // by a single full clear() at startup - over a play session, scene states get
+        // destroyed by the engine (viewport changes, level transitions, etc.) but their
+        // stale pointers stayed in the set. The ghosting fix logic below used to search
+        // this whole set for "the other eye's scene state," which could return a
+        // pointer to already-freed memory - a use-after-free that plausibly explains
+        // the crash-after-a-minute-or-so behavior seen with Ghosting Fix enabled.
+        // Tracking last-seen-frame per entry lets that search be restricted to only
+        // genuinely recently-active (and therefore still-alive) scene states.
+        std::unordered_map<sdk::FSceneViewStateInterface*, uint32_t> known_scene_states;
         bool inside_post_init_properties{false};
 
         uint32_t last_frame_count{};
