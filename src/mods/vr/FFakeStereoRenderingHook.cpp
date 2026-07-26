@@ -3337,17 +3337,17 @@ void FFakeStereoRenderingHook::setup_viewpoint(ISceneViewExtension* extension, v
         return;
     }
 
-    // ISOLATION TEST (2026-07-24): this entire "fix localplayer view count"
-    // mechanism dynamically finds the caller of ISceneViewExtension::SetupViewPoint
-    // at runtime via a return-address walk (utility::find_virtual_function_start)
-    // and installs a brand-new inline hook on whatever it finds - separate, riskier
-    // machinery than the scene-state-sharing logic already tested (and ruled out,
-    // along with set_stereo_pass) in sceneview_constructor. If Survivor's compiled
-    // binary lays this caller out differently than Fallen Order's, this heuristic
-    // could find the wrong address or install a broken hook. Early-returning here to
-    // test whether skipping this mechanism entirely avoids the RenderThread hang.
-    SPDLOG_WARN_ONCE("Ghosting fix: localplayer view count fix SKIPPED for isolation testing");
-    return;
+    // WORKAROUND HISTORY (2026-07-25): an earlier, blunter version early-returned
+    // right here, skipping this whole mechanism. On beta.4 that avoided the
+    // RenderThread hang at the cost of worse ghosting. On beta.5 the same skip
+    // breaks stereo outright - the image renders as a doubled mono view that
+    // rotates with the head - because m_fixed_localplayer_view_count then never
+    // gets set by any path.
+    //
+    // The hang does not live in this function. All this does is install an inline
+    // hook on its caller. The hang is inside post_init_properties(), which
+    // localplayer_setup_viewpoint() calls. So the hook is left intact here and
+    // only that single call is skipped - see localplayer_setup_viewpoint below.
 
     // Using this as a way to get to the localplayer
     static bool attempted_hook{false};
@@ -3387,6 +3387,13 @@ void FFakeStereoRenderingHook::localplayer_setup_viewpoint(void* localplayer, vo
         if (!attempted) {
             attempted = true;
 
+            // Runs for real again as of 2026-07-25. Two earlier workarounds skipped
+            // this - one by not installing the hook at all, one by skipping just
+            // this call - and both cost stereo correctness because nothing else
+            // sets up the second eye's view. The hang they were avoiding has since
+            // been traced to an unbounded exception-retry loop inside
+            // post_init_properties, which is now bounded, so the call is allowed to
+            // proceed and simply aborts if it fails to converge.
             if (localplayer != nullptr && !IsBadReadPtr(localplayer, sizeof(void*))) try {
                 g_hook->post_init_properties((uintptr_t)localplayer);
             } catch(...) {
@@ -5823,6 +5830,19 @@ void FFakeStereoRenderingHook::pre_get_projection_data(safetyhook::Context& ctx)
     g_hook->post_init_properties(localplayer);
 }
 
+// Calls the game's PostInitProperties behind SEH so that a fault which the
+// vectored handler decides not to swallow can unwind instead of spinning.
+// Split into its own function because MSVC forbids __try/__except in a scope
+// that also needs C++ object unwinding.
+static bool call_post_init_properties_guarded(const void (*fn)(uintptr_t), uintptr_t localplayer) {
+    __try {
+        fn(localplayer);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 void FFakeStereoRenderingHook::post_init_properties(uintptr_t localplayer) {
     SPDLOG_INFO("Searching for PostInitProperties virtual function...");
 
@@ -5898,6 +5918,12 @@ void FFakeStereoRenderingHook::post_init_properties(uintptr_t localplayer) {
 
         // If the exception count exceeds a certain amount, we need to un-nop the function call because it was supposed to return a pointer.
         static auto exception_count = 0;
+        // Generous enough that a normally-converging PostInitProperties (a handful
+        // of int3s and a few un-nop retries) never trips it, low enough that a
+        // non-converging one aborts in milliseconds rather than hanging.
+        constexpr auto POST_INIT_PROPERTIES_MAX_EXCEPTIONS = 1000;
+        // Static, so it carries over from any previous attempt on another thread.
+        exception_count = 0;
         static std::vector<Patch::Ptr> patches{};
         static std::vector<uintptr_t> patch_locations{};
 
@@ -5954,6 +5980,34 @@ void FFakeStereoRenderingHook::post_init_properties(uintptr_t localplayer) {
         const auto seh_handler = [](PEXCEPTION_POINTERS info) -> LONG {
             ++exception_count;
 
+            // BOUND (2026-07-25): the comment above about "if the exception count
+            // exceeds a certain amount" describes a limit that was never actually
+            // implemented - exception_count was incremented and reset but never
+            // compared against anything. Without a bound this handler can spin
+            // forever: once `patches` empties, the access-violation branch below
+            // stops applying and every fault falls through to the catch-all that
+            // simply advances RIP and continues. If the faulting instruction sits
+            // in a loop, that never terminates - which presents as the Ghosting Fix
+            // hang on Jedi Survivor (a hang on the calling thread, not a crash).
+            //
+            // Bailing out via EXCEPTION_CONTINUE_SEARCH lets the SEH wrapper around
+            // the call unwind, leaving PostInitProperties partially applied. That is
+            // not ideal, but it is strictly better than hanging the render thread,
+            // and it makes the failure visible in the log instead of silent.
+            if (exception_count > POST_INIT_PROPERTIES_MAX_EXCEPTIONS) {
+                SPDLOG_ERROR("PostInitProperties exceeded {} exceptions (last {:x} at {:x}) - aborting instead of spinning",
+                    POST_INIT_PROPERTIES_MAX_EXCEPTIONS,
+                    info->ExceptionRecord->ExceptionCode,
+                    info->ContextRecord->Rip);
+
+                // Restore anything we NOP'd; Patch's destructor puts the original
+                // bytes back, so the game is left with its own code intact.
+                patches.clear();
+                patch_locations.clear();
+
+                return EXCEPTION_CONTINUE_SEARCH;
+            }
+
             if (info->ExceptionRecord->ExceptionCode == EXCEPTION_BREAKPOINT) {
                 SPDLOG_INFO("Skipping int3 breakpoint at {:x}!", info->ContextRecord->Rip);
                 const auto insn = utility::decode_one((uint8_t*)info->ContextRecord->Rip);
@@ -6005,10 +6059,15 @@ void FFakeStereoRenderingHook::post_init_properties(uintptr_t localplayer) {
         const auto exception_handler = AddVectoredExceptionHandler(1, seh_handler);
 
         m_sceneview_data.inside_post_init_properties = true;
-        post_init_properties(localplayer);
+        const auto completed = call_post_init_properties_guarded(post_init_properties, localplayer);
         m_sceneview_data.inside_post_init_properties = false;
 
-        SPDLOG_INFO("PostInitProperties called!");
+        if (completed) {
+            SPDLOG_INFO("PostInitProperties called! ({} exception(s) handled)", exception_count);
+        } else {
+            SPDLOG_ERROR("PostInitProperties ABORTED after {} exception(s) - the second eye's view "
+                         "may not be set up, expect ghosting or a duplicated view", exception_count);
+        }
 
         // remove the handler
         RemoveVectoredExceptionHandler(exception_handler);
