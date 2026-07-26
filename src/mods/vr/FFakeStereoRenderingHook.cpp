@@ -3698,35 +3698,9 @@ void FFakeStereoRenderingHook::begin_render_viewfamily(ISceneViewExtension* exte
     // This check might seem kind of arbitrary, but sometimes (rarely) the offset
     // for the views can be wrong so if the count is some sane number
     // then we can assume that the offset is correct
-    // Ghosting Fix exemption (2026-07-25). Truncating the view count here is
-    // itself a workaround (see the comment above), and it collides with the
-    // Ghosting Fix, which exists precisely to give the second eye its own view.
-    //
-    // Evidence, sampled from a hung Jedi Survivor render thread: after this
-    // line ran and logged "Setting view count to 1 (from 2)", RenderThread sat
-    // at one instruction across 6/6 samples - a spin, with every other thread
-    // (including RHIThread) parked behind it, and no UEVRBackend frames on its
-    // stack. Disassembly showed a search loop over an indexed collection:
-    //     cmp qword ptr [rsi+428h], r14
-    //     jne <next>                       <- always taken
-    // with count ([rbp+384h]) == 1, index ([rbp+380h]) == 0, a non-null search
-    // key in r14, and [rsi+428h] == NULL on the sole surviving entry. The game
-    // was hunting for the second view that Ghosting Fix had just created, which
-    // this truncation had hidden, and the "not found" branch skips the index
-    // increment entirely - so it never terminates.
-    //
-    // Leaving the count alone when Ghosting Fix is on keeps the second view
-    // reachable. If AFR needs the truncation for its own reasons, the two
-    // features are mutually exclusive and that should be surfaced to the user
-    // rather than hanging the render thread.
-    if (vr->is_using_afr() && !vr->is_ghosting_fix_enabled() &&
-        views_ptr != nullptr && views_ptr->count >= 2 && views_ptr->count <= 4) {
+    if (vr->is_using_afr() && views_ptr != nullptr && views_ptr->count >= 2 && views_ptr->count <= 4) {
         SPDLOG_INFO_ONCE("Setting view count to 1 (from {})", views_ptr->count);
         views_ptr->count = 1;
-    } else if (vr->is_using_afr() && vr->is_ghosting_fix_enabled() &&
-               views_ptr != nullptr && views_ptr->count >= 2 && views_ptr->count <= 4) {
-        SPDLOG_INFO_ONCE("Leaving view count at {} - Ghosting Fix needs the second view "
-                         "(truncating it hangs the render thread on Jedi Survivor)", views_ptr->count);
     }
 
 
