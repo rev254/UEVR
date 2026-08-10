@@ -645,6 +645,39 @@ public:
         return m_ghosting_fix->value();
     }
 
+    // THE WARP HALF OF THE GHOSTING FIX, ON ITS OWN.
+    //
+    // "Ghosting Fix" was one boolean driving two mechanisms that have nothing to
+    // do with each other:
+    //
+    //   A. The AFW warp path - MotionVectorsType Normal instead of FromOtherEye,
+    //      and feeding the UE velocity buffer into the framewarp
+    //      (D3D12Component.cpp, and the velocity capture in VR.cpp). This is the
+    //      half that actually removes the ghosting.
+    //
+    //   B. The FSceneView scene-state swap in FFakeStereoRenderingHook.cpp - the
+    //      known_scene_states pairing, the forced PRIMARY stereo pass, and the
+    //      localplayer view-count fix that calls post_init_properties().
+    //
+    // B is what hangs Jedi Survivor, and has done across every UEVR version for
+    // years (PureDark, 2026-06-30). Nothing in the code requires the two halves
+    // to move together - they were only ever joined by reading the same flag.
+    //
+    // So this accessor gates A, and is_ghosting_fix_enabled() keeps gating B.
+    // The OR means existing configs are untouched: VR_GhostingFix=true still
+    // turns on both halves exactly as before, for every game that is fine with
+    // it. Setting VR_GhostingFixWarpOnly=true with VR_GhostingFix=false is the
+    // new case - the anti-ghosting work without the mechanism that hangs.
+    //
+    // UNPROVEN, and worth stating: FromOtherEye may exist BECAUSE of AFR, i.e.
+    // under alternating-frame rendering each eye's velocity buffer may genuinely
+    // belong to the other eye's frame, and Normal may only be correct once B has
+    // paired the scene states. If so, warp-only produces wrong motion vectors and
+    // looks worse rather than better. That is exactly what testing this settles.
+    bool is_ghosting_fix_warp_enabled() const {
+        return m_ghosting_fix->value() || m_ghosting_fix_warp_only->value();
+    }
+
     bool is_afw_prefer_native_buffers_enabled() const {
         return m_afw_prefer_native_buffers->value();
     }
@@ -1064,6 +1097,9 @@ private:
     const ModSlider::Ptr m_depth_scale{ ModSlider::create(generate_name("DepthScale"), 0.01f, 1.0f, 1.0f) };
 
     const ModToggle::Ptr m_ghosting_fix{ ModToggle::create(generate_name("GhostingFix"), true) };
+    // See is_ghosting_fix_warp_enabled() for what this splits and why. Default
+    // off, so nothing changes for anyone who does not ask for it.
+    const ModToggle::Ptr m_ghosting_fix_warp_only{ ModToggle::create(generate_name("GhostingFixWarpOnly"), false) };
     // AFW normally sources its depth/motion-vector buffers by hooking DLSS's own
     // NVSDK_NGX_D3D12_EvaluateFeature call (see hk_NVSDK_NGX_D3D12_EvaluateFeature in
     // VR.cpp) - this only works because DLSS being active is what makes the engine
@@ -1198,6 +1234,7 @@ public:
             *m_custom_z_near,
             *m_custom_z_near_enabled,
             *m_ghosting_fix,
+            *m_ghosting_fix_warp_only,
             *m_afw_prefer_native_buffers,
             *m_native_stereo_fix,
             *m_native_stereo_fix_same_pass,

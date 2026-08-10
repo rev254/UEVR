@@ -113,7 +113,8 @@ NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_EvaluateFeature(
                 vr->rawMVDesc[nEye].initialState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
                 vr->d3d12Renderer->SetupTextureDesc(vr->rawMVDesc[nEye]);
             }
-            if (vr->is_ghosting_fix_enabled() && vr->is_fix_object_motion_vector() && 
+            // WARP HALF - see VR::is_ghosting_fix_warp_enabled().
+            if (vr->is_ghosting_fix_warp_enabled() && vr->is_fix_object_motion_vector() &&
                 vr->rawVelocityDesc[nEye].pTexture && vr->rawVelocityDesc[nEyeOther].pTexture) {
                 if (vr->rawMVDesc[nEye].pTexture && vr->motionVectorsDesc[nEye].pTexture) {
                     vr->update_camera_data(render_frame_count);
@@ -222,7 +223,10 @@ void WINAPI hk_ID3D12GraphicsCommandList_ResourceBarrier(ID3D12GraphicsCommandLi
         bool RHIThreadPass = isRHIThread && !isRHISubmissionThreadFoundRecently;
         bool RHISubmissionThreadPass = !isRHIThread;
         if (RHIThreadPass || RHISubmissionThreadPass) {
-            if (velocityCandidate && vr->is_ghosting_fix_enabled() && vr->is_fix_object_motion_vector() &&
+            // WARP HALF - this is what populates rawVelocityDesc at all, so the
+            // two sites above are dead without it. See
+            // VR::is_ghosting_fix_warp_enabled().
+            if (velocityCandidate && vr->is_ghosting_fix_warp_enabled() && vr->is_fix_object_motion_vector() &&
                 (render_frame_count - vr->last_dlss_frame_count) <= 1) {
                 auto desc = velocityCandidate->GetDesc();
                 if (vr->rawVelocityDesc[nEye].pTexture == NULL || vr->rawVelocityDesc[nEye].pTexture->GetDesc().Width != desc.Width ||
@@ -2992,7 +2996,10 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
                     m_enable_sharpening->draw("Enable Sharpening");
                     m_sharpness->draw("Sharpness");
                     ImGui::Spacing();
-                    if (is_ghosting_fix_enabled()) {
+                    // These follow the WARP half, not the scene-state half -
+                    // otherwise warp-only mode leaves them greyed out and
+                    // unreachable, which is the mode they matter most in.
+                    if (is_ghosting_fix_warp_enabled()) {
                         m_fix_object_motion_vector->draw("Fix Object Motion Vector");
                         m_fix_object_motion_range->draw("Fix Object Motion Rnage");
                         if (is_fix_object_motion_vector() && !rawVelocityDesc[0].pTexture) {
@@ -3002,10 +3009,10 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
                         }
                         ImGui::Spacing();
                     } else {
-                        ImGui::BeginDisabled(!is_ghosting_fix_enabled());
+                        ImGui::BeginDisabled(true);
                         m_fix_object_motion_vector->draw("Fix Object Motion Vector");
                         ImGui::EndDisabled();
-                        ImGui::TextWrapped("Object Motion fix is only needed when ghosting fix is enabled.");
+                        ImGui::TextWrapped("Object Motion fix is only needed when ghosting fix (or warp-only) is enabled.");
                     }
                     m_ignore_motion_threshold->draw("Ignore Motion Threshold");
                     m_ultra_responsive->draw("Ultra Responsive");
@@ -3032,6 +3039,10 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
         m_enable_depth->draw("Enable Depth-based Latency Reduction");
         m_load_blueprint_code->draw("Load Blueprint Code");
         m_ghosting_fix->draw("Ghosting Fix");
+        m_ghosting_fix_warp_only->draw("Ghosting Fix: warp only (no scene-state swap)");
+        ImGui::TextWrapped("Applies the AFW motion-vector half of the Ghosting Fix without the "
+                           "FSceneView scene-state swap that hangs some titles (Jedi Survivor). "
+                           "Leave Ghosting Fix itself OFF when using this.");
         m_afw_prefer_native_buffers->draw("AFW: Prefer Native Depth/Motion Vectors (skip DLSS hook)");
 
         ImGui::SetNextItemOpen(true, ImGuiCond_::ImGuiCond_Once);

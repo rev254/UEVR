@@ -584,7 +584,11 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
         params.InEyeFrameBuffer = &s_CurrentEyeFrameBuffer;
         params.InUIColorAlpha = NULL;
         params.IsHudlessColor = true;
-        params.MotionVectorsType = vr->is_ghosting_fix_enabled() ? Normal : FromOtherEye;
+        // WARP HALF. Deliberately not is_ghosting_fix_enabled() - this is the
+        // line that actually removes the ghosting, and it has nothing to do with
+        // the scene-state swap that hangs Survivor. See
+        // VR::is_ghosting_fix_warp_enabled().
+        params.MotionVectorsType = vr->is_ghosting_fix_warp_enabled() ? Normal : FromOtherEye;
         params.InMotionScale[0] = vr->mvScale[0];
         params.InMotionScale[1] = vr->mvScale[1];
         params.Mode = (FrameWarpMode)vr->m_framewarp_mode->value();
@@ -593,7 +597,7 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
         params.CameraData = &vr->cameraData[nEye];
         params.IgnoreMotionThreshold = vr->m_ignore_motion_threshold->value();
         params.Debug = vr->m_framewarp_debug->value();
-        if (vr->is_ghosting_fix_enabled() && vr->is_fix_object_motion_vector() && vr->is_fix_moving_object_brightness_flickering())
+        if (vr->is_ghosting_fix_warp_enabled() && vr->is_fix_object_motion_vector() && vr->is_fix_moving_object_brightness_flickering())
             params.InUEVelocityBuffer = &vr->rawVelocityDesc[nEye];
         params.UseUINT64 = vr->is_use_uint64();
         EvaluateFrameWarp(params);
