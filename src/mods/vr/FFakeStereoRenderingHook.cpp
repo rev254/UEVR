@@ -3200,6 +3200,33 @@ sdk::FSceneView* FFakeStereoRenderingHook::sceneview_constructor(sdk::FSceneView
         }
     }
 
+    // THE CLOCK FOR RECENCY. Deliberately NOT g_frame_count.
+    //
+    // g_frame_count is not a usable clock for this. Captured 2026-08-10 with
+    // Ghosting Fix enabled from a profile:
+    //
+    //   swapped=false eye1=0 paired_frame=1 frame=56294
+    //
+    // Both scene states were learned at frame 1, during startup, and by the
+    // time the swap was attempted the counter read 56294 - so the other eye's
+    // state looked ~56,000 frames stale, the 90-frame window rejected it, and
+    // the swap never fired. No swap means no fix AND no second-eye setup, which
+    // is a doubled/tripled image rather than a subtle regression.
+    //
+    // It jumps the other way too: 1 -> 13901 between one view construction and
+    // the next in another capture, and a backwards step underflows the unsigned
+    // subtraction to ~2^32. Same failure, both directions.
+    //
+    // VR's render frame count is monotonic and ours, which is what a recency
+    // window actually needs.
+    const uint32_t recency_now = (uint32_t)VR::get()->get_render_frame_count();
+
+    // A counter that went backwards tells us nothing about age, so treat that
+    // as just-seen rather than infinitely old.
+    const auto frame_age = [](uint32_t now, uint32_t then) -> uint32_t {
+        return now >= then ? (now - then) : 0;
+    };
+
     bool new_scene_state_inserted_this_frame = false;
 
     if (init_options_scene_state != nullptr) {
@@ -3207,14 +3234,14 @@ sdk::FSceneView* FFakeStereoRenderingHook::sceneview_constructor(sdk::FSceneView
 
         if (known_it == known_scene_states.end()) {
             SPDLOG_INFO("Inserting new scene state {:x}", (uintptr_t)init_options_scene_state);
-            known_scene_states[init_options_scene_state] = g_frame_count;
+            known_scene_states[init_options_scene_state] = recency_now;
             new_scene_state_inserted_this_frame = true;
         } else {
             // Refresh the recency timestamp for every scene state we actually see, not
             // just newly-discovered ones - this is what lets the "find the other eye's
             // state" search below restrict itself to genuinely live scene states (see
             // known_scene_states comment in FFakeStereoRenderingHook.hpp).
-            known_it->second = g_frame_count;
+            known_it->second = recency_now;
         }
     } else {
         SPDLOG_ERROR_ONCE("Scene state passed to FSceneView constructor is null");
@@ -3244,7 +3271,7 @@ sdk::FSceneView* FFakeStereoRenderingHook::sceneview_constructor(sdk::FSceneView
         auto& paired_frame = g_hook->m_sceneview_data.states_paired_frame;
         if (known_scene_states.size() >= 2) {
             if (paired_frame == 0) {
-                paired_frame = g_frame_count;
+                paired_frame = recency_now;
                 SPDLOG_INFO("[GhostingFixTrace] both scene states known at frame {} - "
                             "holding off the swap for {} frames",
                             paired_frame, vr->get_ghosting_fix_stable_frames());
@@ -3261,7 +3288,7 @@ sdk::FSceneView* FFakeStereoRenderingHook::sceneview_constructor(sdk::FSceneView
         if (paired_frame == 0) {
             return false;
         }
-        return (g_frame_count - paired_frame) >= vr->get_ghosting_fix_stable_frames();
+        return frame_age(recency_now, paired_frame) >= vr->get_ghosting_fix_stable_frames();
     }();
 
     if (init_options_scene_state != nullptr && !new_scene_state_inserted_this_frame && vr->is_ghosting_fix_enabled() && !known_scene_states.empty() && vr->is_using_afr() && true_index == 1 && ghosting_fix_states_settled) {
@@ -3270,12 +3297,12 @@ sdk::FSceneView* FFakeStereoRenderingHook::sceneview_constructor(sdk::FSceneView
         init_options->set_stereo_pass(EStereoscopicPass::eSSP_PRIMARY);
         auto& eye_pair = g_hook->m_sceneview_data.m_ghosting_fix_pair;
         if (eye_pair.eye_state[0] == init_options_scene_state) {
-            eye_pair.last_seen_frame = g_frame_count;
+            eye_pair.last_seen_frame = recency_now;
         // Fix: this used to compare the eye_state ARRAY itself to nullptr (always
         // false due to array-to-pointer decay), so this reset branch never actually
         // fired on "never initialized" - it silently relied on the 90-frame staleness
         // check alone. Now correctly checks the first slot's value.
-        } else if (eye_pair.eye_state[0] == nullptr || g_frame_count - eye_pair.last_seen_frame > 90) {
+        } else if (eye_pair.eye_state[0] == nullptr || frame_age(recency_now, eye_pair.last_seen_frame) > 90) {
             eye_pair.eye_state[0] = init_options_scene_state;
             eye_pair.eye_state[1] = nullptr;
         }
@@ -3312,9 +3339,9 @@ sdk::FSceneView* FFakeStereoRenderingHook::sceneview_constructor(sdk::FSceneView
 
             for (auto& [scene_state, last_seen_frame] : known_scene_states) {
                 if (scene_state == init_options_scene_state) { trace_rejected_same++; }
-                else if (g_frame_count - last_seen_frame > 90) { trace_rejected_stale++; }
+                else if (frame_age(recency_now, last_seen_frame) > 90) { trace_rejected_stale++; }
 
-                if (scene_state != init_options_scene_state && g_frame_count - last_seen_frame <= 90) {
+                if (scene_state != init_options_scene_state && frame_age(recency_now, last_seen_frame) <= 90) {
                     trace_found_candidate = true;
                     // Defense in depth: set_scene_state() itself almost certainly just
                     // stores the pointer value (a plain assignment can't fault), so this
