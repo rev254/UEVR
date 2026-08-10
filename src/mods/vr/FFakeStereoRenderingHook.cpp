@@ -3533,13 +3533,9 @@ void FFakeStereoRenderingHook::localplayer_setup_viewpoint(void* localplayer, vo
             // 2026-07-24's isolation test says the hang will go. This exists
             // to re-verify that on the current build, three fixes later,
             // because the whole plan now rests on it.
-            const bool skip_pip = vr->is_ghosting_fix_skip_post_init_properties();
-
-            if (skip_pip) {
-                SPDLOG_WARN("[LocalPlayerSetupViewPoint] post_init_properties SKIPPED by "
-                            "VR_GhostingFixSkipPostInitProperties. The second eye's view state "
-                            "will NOT be allocated - expect broken stereo. Diagnostic only.");
-            } else if (localplayer != nullptr && !IsBadReadPtr(localplayer, sizeof(void*))) try {
+            // The skip check itself lives INSIDE post_init_properties, because
+            // this is only one of its three callers. See the guard there.
+            if (localplayer != nullptr && !IsBadReadPtr(localplayer, sizeof(void*))) try {
                 g_hook->post_init_properties((uintptr_t)localplayer);
             } catch(...) {
                 SPDLOG_ERROR("[LocalPlayerSetupViewPoint] Failed to post init properties");
@@ -6047,6 +6043,25 @@ static bool call_post_init_properties_guarded(const void (*fn)(uintptr_t), uintp
 }
 
 void FFakeStereoRenderingHook::post_init_properties(uintptr_t localplayer) {
+    // =====================================================================
+    // THE GUARD LIVES HERE, not at the call site. (2026-08-10)
+    //
+    // First attempt put it in localplayer_setup_viewpoint only, and the very
+    // next test run called PostInitProperties anyway - because there are THREE
+    // callers: localplayer_setup_viewpoint, pre_get_projection_data, and the
+    // CalculateStereoProjectionMatrix midhook. Guarding one of three proves
+    // nothing and produced a run that looked like a result.
+    //
+    // Setting m_fixed_localplayer_view_count here is what stops the other two
+    // callers retrying every frame; they all test it before calling.
+    if (VR::get()->is_ghosting_fix_skip_post_init_properties()) {
+        SPDLOG_WARN_ONCE("[GhostingFixTrace] post_init_properties SKIPPED by "
+                         "VR_GhostingFixSkipPostInitProperties. The second eye's view state "
+                         "will NOT be allocated - expect broken stereo. Diagnostic only.");
+        g_hook->m_fixed_localplayer_view_count = true;
+        return;
+    }
+
     SPDLOG_INFO("Searching for PostInitProperties virtual function...");
 
     std::optional<uint32_t> idx{};
