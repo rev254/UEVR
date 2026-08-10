@@ -3860,8 +3860,27 @@ void FFakeStereoRenderingHook::begin_render_viewfamily(ISceneViewExtension* exte
     // reachable. If AFR needs the truncation for its own reasons, the two
     // features are mutually exclusive and that should be surfaced to the user
     // rather than hanging the render thread.
-    if (vr->is_using_afr() && !vr->is_ghosting_fix_enabled() &&
-        views_ptr != nullptr && views_ptr->count >= 2 && views_ptr->count <= 4) {
+    // 2026-08-10: THE EXEMPTION IS ITSELF A SUSPECT.
+    //
+    // Two runs of the SAME build, an hour and a half apart:
+    //
+    //   13:44  no "Leaving view count at 2"  ->  1 view rendered, 1 scene state
+    //   16:14  "Leaving view count at 2"     ->  2 views rendered, 2 scene states,
+    //                                            and a visible triple image
+    //
+    // Two views rendering under AFR - where the whole point of AFR is one view
+    // per frame, alternating eyes - is a straightforward explanation for the
+    // doubled/tripled scene the tester sees. The exemption was added on
+    // 2026-07-25 because truncating hung the render thread, but that was with
+    // PostInitProperties running. With PIP skipped (the path that produced the
+    // one verified-good result) truncation has never actually been retried.
+    //
+    // So: make it a setting rather than a hardcoded assumption, and find out.
+    const bool truncate = views_ptr != nullptr && views_ptr->count >= 2 && views_ptr->count <= 4
+                          && vr->is_using_afr()
+                          && (!vr->is_ghosting_fix_enabled() || vr->should_truncate_view_count_with_ghosting_fix());
+
+    if (truncate) {
         SPDLOG_INFO_ONCE("Setting view count to 1 (from {})", views_ptr->count);
         views_ptr->count = 1;
     } else if (vr->is_using_afr() && vr->is_ghosting_fix_enabled() &&

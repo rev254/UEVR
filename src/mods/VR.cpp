@@ -3039,6 +3039,7 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
         m_enable_depth->draw("Enable Depth-based Latency Reduction");
         m_load_blueprint_code->draw("Load Blueprint Code");
         m_ghosting_fix->draw("Ghosting Fix");
+        m_ghosting_fix_truncate_view_count->draw("Ghosting Fix: truncate view count to 1 (AFR)");
         m_ghosting_fix_skip_post_init_properties->draw("Ghosting Fix: skip PostInitProperties (DIAGNOSTIC - BREAKS STEREO)");
         ImGui::TextWrapped("Never call ULocalPlayer::PostInitProperties, so the second eye's scene "
                            "view state is never allocated. Stereo WILL break (doubled mono image "

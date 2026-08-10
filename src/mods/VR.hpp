@@ -683,6 +683,10 @@ public:
     // the second eye's FSceneViewState is never allocated, which BREAKS STEREO
     // (doubled mono image that rotates with the head). The point is to find out
     // whether that call is what hangs Jedi Survivor.
+    bool should_truncate_view_count_with_ghosting_fix() const {
+        return m_ghosting_fix_truncate_view_count->value();
+    }
+
     bool is_ghosting_fix_skip_post_init_properties() const {
         return m_ghosting_fix_skip_post_init_properties->value();
     }
@@ -1131,6 +1135,12 @@ private:
     const ModInt32::Ptr m_ghosting_fix_stable_frames{ ModInt32::create(generate_name("GhostingFixStableFrames"), 12) };
     const ModToggle::Ptr m_ghosting_fix_suppress_bootstrap{ ModToggle::create(generate_name("GhostingFixSuppressBootstrap"), false) };
     const ModToggle::Ptr m_ghosting_fix_skip_post_init_properties{ ModToggle::create(generate_name("GhostingFixSkipPostInitProperties"), false) };
+    // 2026-08-10: two views rendering under AFR is a candidate cause of the
+    // doubled/tripled image. The 2026-07-25 exemption that stopped truncating
+    // was measured with PostInitProperties RUNNING; with PIP skipped it has
+    // never been retried. Default true = truncate, i.e. the pre-exemption
+    // behaviour, because AFR wants one view per frame.
+    const ModToggle::Ptr m_ghosting_fix_truncate_view_count{ ModToggle::create(generate_name("GhostingFixTruncateViewCount"), true) };
     // AFW normally sources its depth/motion-vector buffers by hooking DLSS's own
     // NVSDK_NGX_D3D12_EvaluateFeature call (see hk_NVSDK_NGX_D3D12_EvaluateFeature in
     // VR.cpp) - this only works because DLSS being active is what makes the engine
@@ -1269,6 +1279,7 @@ public:
             *m_ghosting_fix_stable_frames,
             *m_ghosting_fix_suppress_bootstrap,
             *m_ghosting_fix_skip_post_init_properties,
+            *m_ghosting_fix_truncate_view_count,
             *m_afw_prefer_native_buffers,
             *m_native_stereo_fix,
             *m_native_stereo_fix_same_pass,
