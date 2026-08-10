@@ -678,6 +678,15 @@ public:
         return m_ghosting_fix->value() || m_ghosting_fix_warp_only->value();
     }
 
+    // HOW LONG TO LEAVE THE ENGINE ALONE after both eyes' scene states are
+    // known, before starting to swap them. See the states_paired_frame comment
+    // in FFakeStereoRenderingHook.hpp for the captured timeline this exists to
+    // fix. 0 restores the old zero-wait behaviour.
+    uint32_t get_ghosting_fix_stable_frames() const {
+        const auto v = m_ghosting_fix_stable_frames->value();
+        return v < 0 ? 0u : (uint32_t)v;
+    }
+
     bool is_afw_prefer_native_buffers_enabled() const {
         return m_afw_prefer_native_buffers->value();
     }
@@ -1100,6 +1109,8 @@ private:
     // See is_ghosting_fix_warp_enabled() for what this splits and why. Default
     // off, so nothing changes for anyone who does not ask for it.
     const ModToggle::Ptr m_ghosting_fix_warp_only{ ModToggle::create(generate_name("GhostingFixWarpOnly"), false) };
+    // 12 matches the wait the other fork build used ("stable_frames=1/12").
+    const ModInt32::Ptr m_ghosting_fix_stable_frames{ ModInt32::create(generate_name("GhostingFixStableFrames"), 12) };
     // AFW normally sources its depth/motion-vector buffers by hooking DLSS's own
     // NVSDK_NGX_D3D12_EvaluateFeature call (see hk_NVSDK_NGX_D3D12_EvaluateFeature in
     // VR.cpp) - this only works because DLSS being active is what makes the engine
@@ -1235,6 +1246,7 @@ public:
             *m_custom_z_near_enabled,
             *m_ghosting_fix,
             *m_ghosting_fix_warp_only,
+            *m_ghosting_fix_stable_frames,
             *m_afw_prefer_native_buffers,
             *m_native_stereo_fix,
             *m_native_stereo_fix_same_pass,

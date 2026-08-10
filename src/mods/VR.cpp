@@ -3039,6 +3039,10 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
         m_enable_depth->draw("Enable Depth-based Latency Reduction");
         m_load_blueprint_code->draw("Load Blueprint Code");
         m_ghosting_fix->draw("Ghosting Fix");
+        m_ghosting_fix_stable_frames->draw("Ghosting Fix: frames to settle before swapping");
+        ImGui::TextWrapped("Wait this many frames after both eyes' scene states are known before "
+                           "starting to swap them. 0 = swap immediately (the old behaviour, which "
+                           "hangs Jedi Survivor one frame after the second state appears).");
         m_ghosting_fix_warp_only->draw("Ghosting Fix: warp only (no scene-state swap)");
         ImGui::TextWrapped("Applies the AFW motion-vector half of the Ghosting Fix without the "
                            "FSceneView scene-state swap that hangs some titles (Jedi Survivor). "

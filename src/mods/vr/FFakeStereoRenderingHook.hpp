@@ -474,6 +474,25 @@ private:
 
         GhostingFixPair m_ghosting_fix_pair{};
 
+        // THE FRAME BOTH EYES' SCENE STATES WERE FIRST KNOWN. 0 = not yet.
+        //
+        // 2026-08-10: the hang lands one frame after the second state is
+        // learned. Captured timeline, 13 milliseconds end to end:
+        //
+        //   frame 80838   insert A, insert B        (known goes 1 -> 2)
+        //   frame 80839   swap fires, A redirected to B
+        //   ...           RenderThread spins forever on A, with A+0x428 null
+        //
+        // The engine gets exactly one frame with these states before we start
+        // rewriting which view points at which, and A+0x428 - the field the
+        // spin loop waits on - is still null at that moment.
+        //
+        // The other, more feature-rich fork build logged "Deferring separate-
+        // state bootstrap until the scene is stable ... stable_frames=1/12",
+        // i.e. it waited 12 frames for what is very likely this same reason.
+        // This build waited zero. See VR::get_ghosting_fix_stable_frames().
+        uint32_t states_paired_frame{};
+
         // For keeping track of what the states were before our modifications.
         std::unordered_map<sdk::FSceneViewStateInterface*, sdk::FSceneViewInitOptionsUE4> view_init_options_ue4{};
         std::unordered_map<sdk::FSceneViewStateInterface*, sdk::FSceneViewInitOptionsUE5> view_init_options_ue5{};

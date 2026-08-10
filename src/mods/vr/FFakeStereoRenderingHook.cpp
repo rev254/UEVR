@@ -3224,7 +3224,47 @@ sdk::FSceneView* FFakeStereoRenderingHook::sceneview_constructor(sdk::FSceneView
         }
     }
 
-    if (init_options_scene_state != nullptr && !new_scene_state_inserted_this_frame && vr->is_ghosting_fix_enabled() && !known_scene_states.empty() && vr->is_using_afr() && true_index == 1) {
+    // =====================================================================
+    // LET THE ENGINE SETTLE BEFORE TOUCHING ANYTHING. (2026-08-10)
+    //
+    // Record the frame both states first became known, then refuse to do any
+    // of the work below until they have survived a stable window. See the
+    // states_paired_frame comment in the .hpp for the captured 13-millisecond
+    // timeline this exists to break up.
+    //
+    // This gates the WHOLE block, PRIMARY included. That is deliberate even
+    // though removing set_stereo_pass alone was ruled out on 2026-07-24: the
+    // 2026-08-10 captures show the game hangs whether the redirect succeeds
+    // (run 2) or never fires at all (run 1), so no single line inside is the
+    // culprit and the honest move is to not run any of it too early.
+    //
+    // Fails OPEN in the sense that matters: once the window passes, behaviour
+    // is exactly as before. Setting the window to 0 restores the old timing.
+    {
+        auto& paired_frame = g_hook->m_sceneview_data.states_paired_frame;
+        if (known_scene_states.size() >= 2) {
+            if (paired_frame == 0) {
+                paired_frame = g_frame_count;
+                SPDLOG_INFO("[GhostingFixTrace] both scene states known at frame {} - "
+                            "holding off the swap for {} frames",
+                            paired_frame, vr->get_ghosting_fix_stable_frames());
+            }
+        } else {
+            // Lost one (level load, viewport change). Start the wait over
+            // rather than treating a fresh pair as already settled.
+            paired_frame = 0;
+        }
+    }
+
+    const auto ghosting_fix_states_settled = [&]() {
+        const auto paired_frame = g_hook->m_sceneview_data.states_paired_frame;
+        if (paired_frame == 0) {
+            return false;
+        }
+        return (g_frame_count - paired_frame) >= vr->get_ghosting_fix_stable_frames();
+    }();
+
+    if (init_options_scene_state != nullptr && !new_scene_state_inserted_this_frame && vr->is_ghosting_fix_enabled() && !known_scene_states.empty() && vr->is_using_afr() && true_index == 1 && ghosting_fix_states_settled) {
         // Ruled out (2026-07-24): tested with this call removed - hang persisted
         // identically, so this specific line is NOT the cause. Restored.
         init_options->set_stereo_pass(EStereoscopicPass::eSSP_PRIMARY);
@@ -3340,11 +3380,14 @@ sdk::FSceneView* FFakeStereoRenderingHook::sceneview_constructor(sdk::FSceneView
             s_reports++;
             s_last_signature = signature;
             SPDLOG_INFO("[GhostingFixTrace] frame={} true_index={} state={:x} "
-                        "inserted_this_frame={} known={} eye0={:x} eye1={:x} swapped={}",
+                        "inserted_this_frame={} known={} eye0={:x} eye1={:x} swapped={} "
+                        "settled={} paired_frame={}",
                         g_frame_count, true_index, (uintptr_t)init_options_scene_state,
                         new_scene_state_inserted_this_frame, known_scene_states.size(),
                         (uintptr_t)trace_pair.eye_state[0], (uintptr_t)trace_pair.eye_state[1],
-                        trace_pair.eye_state[1] != nullptr);
+                        trace_pair.eye_state[1] != nullptr,
+                        ghosting_fix_states_settled,
+                        g_hook->m_sceneview_data.states_paired_frame);
         }
     }
 
@@ -6166,6 +6209,9 @@ void FFakeStereoRenderingHook::post_init_properties(uintptr_t localplayer) {
     }
 
     g_hook->m_sceneview_data.known_scene_states.clear();
+    // Clearing the states without clearing this would leave the next pair
+    // looking already-settled, and the wait would never actually happen.
+    g_hook->m_sceneview_data.states_paired_frame = 0;
     g_hook->m_fixed_localplayer_view_count = true;
 }
 
