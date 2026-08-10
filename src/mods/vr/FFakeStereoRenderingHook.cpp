@@ -3262,8 +3262,20 @@ sdk::FSceneView* FFakeStereoRenderingHook::sceneview_constructor(sdk::FSceneView
             // eye_pair.last_seen_frame, so this should almost never exclude a
             // legitimately-active state under normal play, while still excluding
             // genuinely long-dead ones.
+            // 2026-08-10: record whether this search finds anything at all. A
+            // failed search is the documented path to the half-configured view
+            // (PRIMARY forced, no redirect) that hangs the render thread, and
+            // until now it produced no log output whatsoever.
+            bool trace_found_candidate = false;
+            size_t trace_rejected_same = 0;
+            size_t trace_rejected_stale = 0;
+
             for (auto& [scene_state, last_seen_frame] : known_scene_states) {
+                if (scene_state == init_options_scene_state) { trace_rejected_same++; }
+                else if (g_frame_count - last_seen_frame > 90) { trace_rejected_stale++; }
+
                 if (scene_state != init_options_scene_state && g_frame_count - last_seen_frame <= 90) {
+                    trace_found_candidate = true;
                     // Defense in depth: set_scene_state() itself almost certainly just
                     // stores the pointer value (a plain assignment can't fault), so this
                     // can't catch a fault that happens later when the stored pointer is
@@ -3280,6 +3292,59 @@ sdk::FSceneView* FFakeStereoRenderingHook::sceneview_constructor(sdk::FSceneView
                     break;
                 }
             }
+
+            if (!trace_found_candidate) {
+                static uint32_t s_fail_reports = 0;
+                if (s_fail_reports < 20) {
+                    s_fail_reports++;
+                    SPDLOG_WARN("[GhostingFixTrace] NO SWAP CANDIDATE - frame={} state={:x} "
+                                "known={} rejected_same={} rejected_stale={}. "
+                                "eSSP_PRIMARY was forced with no redirect; this is the "
+                                "half-configured view that hangs the render thread.",
+                                g_frame_count, (uintptr_t)init_options_scene_state,
+                                known_scene_states.size(), trace_rejected_same, trace_rejected_stale);
+                }
+            }
+        }
+    }
+
+    // =====================================================================
+    // WHY DID THE SWAP NOT HAPPEN? (2026-08-10)
+    //
+    // The 2026-08-10 hang log contains two "Inserting new scene state" lines
+    // and ZERO "Setting scene state to" lines - so both eyes' states were
+    // learned, the swap never fired, and eSSP_PRIMARY was forced anyway. The
+    // render thread then spun forever on scene state 2914c216dc0, which is the
+    // FIRST of those two inserts, with its +0x428 field null.
+    //
+    // Every existing log line in this function is _ONCE, which is exactly why
+    // this stayed invisible: a swap that never happens logs nothing at all, and
+    // nobody reads an absent line. This reports which guard actually failed.
+    //
+    // Throttled hard - first 40 hits, then only when the picture changes -
+    // because this sits in the FSceneView constructor, per eye per frame.
+    if (vr->is_ghosting_fix_enabled() && vr->is_using_afr()) {
+        static uint32_t s_reports = 0;
+        static uint64_t s_last_signature = ~0ull;
+
+        auto& trace_pair = g_hook->m_sceneview_data.m_ghosting_fix_pair;
+        const uint64_t signature =
+            ((uint64_t)(true_index & 0xF) << 60)
+            | ((uint64_t)(new_scene_state_inserted_this_frame ? 1 : 0) << 59)
+            | ((uint64_t)(init_options_scene_state != nullptr ? 1 : 0) << 58)
+            | ((uint64_t)(trace_pair.eye_state[0] != nullptr ? 1 : 0) << 57)
+            | ((uint64_t)(trace_pair.eye_state[1] != nullptr ? 1 : 0) << 56)
+            | (uint64_t)(known_scene_states.size() & 0xFF);
+
+        if (s_reports < 40 || signature != s_last_signature) {
+            s_reports++;
+            s_last_signature = signature;
+            SPDLOG_INFO("[GhostingFixTrace] frame={} true_index={} state={:x} "
+                        "inserted_this_frame={} known={} eye0={:x} eye1={:x} swapped={}",
+                        g_frame_count, true_index, (uintptr_t)init_options_scene_state,
+                        new_scene_state_inserted_this_frame, known_scene_states.size(),
+                        (uintptr_t)trace_pair.eye_state[0], (uintptr_t)trace_pair.eye_state[1],
+                        trace_pair.eye_state[1] != nullptr);
         }
     }
 
