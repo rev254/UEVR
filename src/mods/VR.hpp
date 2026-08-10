@@ -678,6 +678,15 @@ public:
         return m_ghosting_fix->value() || m_ghosting_fix_warp_only->value();
     }
 
+    // SKIP post_init_properties(). Diagnostic, not a fix - see the call site in
+    // FFakeStereoRenderingHook::localplayer_setup_viewpoint. Skipping it means
+    // the second eye's FSceneViewState is never allocated, which BREAKS STEREO
+    // (doubled mono image that rotates with the head). The point is to find out
+    // whether that call is what hangs Jedi Survivor.
+    bool is_ghosting_fix_skip_post_init_properties() const {
+        return m_ghosting_fix_skip_post_init_properties->value();
+    }
+
     // REFUSE THE TWO-VIEW BOOTSTRAP. Diagnostic, not a fix - see the call site
     // in FFakeStereoRenderingHook::get_desired_number_of_views_hook. With this
     // on, Ghosting Fix never learns the second eye's scene state, so it cannot
@@ -1121,6 +1130,7 @@ private:
     // 12 matches the wait the other fork build used ("stable_frames=1/12").
     const ModInt32::Ptr m_ghosting_fix_stable_frames{ ModInt32::create(generate_name("GhostingFixStableFrames"), 12) };
     const ModToggle::Ptr m_ghosting_fix_suppress_bootstrap{ ModToggle::create(generate_name("GhostingFixSuppressBootstrap"), false) };
+    const ModToggle::Ptr m_ghosting_fix_skip_post_init_properties{ ModToggle::create(generate_name("GhostingFixSkipPostInitProperties"), false) };
     // AFW normally sources its depth/motion-vector buffers by hooking DLSS's own
     // NVSDK_NGX_D3D12_EvaluateFeature call (see hk_NVSDK_NGX_D3D12_EvaluateFeature in
     // VR.cpp) - this only works because DLSS being active is what makes the engine
@@ -1258,6 +1268,7 @@ public:
             *m_ghosting_fix_warp_only,
             *m_ghosting_fix_stable_frames,
             *m_ghosting_fix_suppress_bootstrap,
+            *m_ghosting_fix_skip_post_init_properties,
             *m_afw_prefer_native_buffers,
             *m_native_stereo_fix,
             *m_native_stereo_fix_same_pass,

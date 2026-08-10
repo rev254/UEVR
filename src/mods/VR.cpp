@@ -3039,6 +3039,11 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
         m_enable_depth->draw("Enable Depth-based Latency Reduction");
         m_load_blueprint_code->draw("Load Blueprint Code");
         m_ghosting_fix->draw("Ghosting Fix");
+        m_ghosting_fix_skip_post_init_properties->draw("Ghosting Fix: skip PostInitProperties (DIAGNOSTIC - BREAKS STEREO)");
+        ImGui::TextWrapped("Never call ULocalPlayer::PostInitProperties, so the second eye's scene "
+                           "view state is never allocated. Stereo WILL break (doubled mono image "
+                           "that rotates with your head). This exists only to test whether that "
+                           "call is what hangs the render thread.");
         m_ghosting_fix_suppress_bootstrap->draw("Ghosting Fix: suppress the 2-view bootstrap (DIAGNOSTIC)");
         ImGui::TextWrapped("Never ask the engine for a second view, so the second eye's scene state "
                            "is never learned and the swap can never fire. Ghosting is NOT fixed with "

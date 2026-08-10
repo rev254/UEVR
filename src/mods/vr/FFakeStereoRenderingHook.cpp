@@ -3489,6 +3489,8 @@ void FFakeStereoRenderingHook::localplayer_setup_viewpoint(void* localplayer, vo
     ZoneScopedN("LocalPlayerSetupViewPoint");
     SPDLOG_INFO_ONCE("Called LocalPlayerSetupViewPoint for the first time");
 
+    auto& vr = VR::get();
+
     if (!g_hook->m_fixed_localplayer_view_count) {
         static bool attempted = false;
 
@@ -3502,7 +3504,42 @@ void FFakeStereoRenderingHook::localplayer_setup_viewpoint(void* localplayer, vo
             // been traced to an unbounded exception-retry loop inside
             // post_init_properties, which is now bounded, so the call is allowed to
             // proceed and simply aborts if it fails to converge.
-            if (localplayer != nullptr && !IsBadReadPtr(localplayer, sizeof(void*))) try {
+            // =============================================================
+            // THE LINCHPIN TEST. (2026-08-10)
+            //
+            // Three things were eliminated today, each with a build and a
+            // hang: deferring the scene-state swap entirely, suppressing the
+            // two-view bootstrap, and (by consequence) the forced PRIMARY
+            // stereo pass. With Ghosting Fix doing nothing observable at all,
+            // Survivor still wedged one frame after the FSceneView constructor
+            // hook went live.
+            //
+            // What ticking the toggle does FIRST, from the log, is install
+            // this hook and call post_init_properties() - 41 milliseconds
+            // before the spin. That is the last untested thing on the path.
+            //
+            // ULocalPlayer::PostInitProperties() allocates ViewState and then
+            // one StereoViewStates entry per extra view GetDesiredNumberOfViews
+            // reports - which is why line ~5697 lies and returns 2 while
+            // inside_post_init_properties is set. Allocating that second
+            // FSceneViewState is the entire point of calling it.
+            //
+            // Skipping it is EXPECTED TO BREAK STEREO - a doubled mono image
+            // that rotates with the head - because nothing else sets up the
+            // second eye. That is not a regression, it is the cost of the
+            // measurement, and it is precisely why the real fix has to
+            // allocate the state some other way.
+            //
+            // 2026-07-24's isolation test says the hang will go. This exists
+            // to re-verify that on the current build, three fixes later,
+            // because the whole plan now rests on it.
+            const bool skip_pip = vr->is_ghosting_fix_skip_post_init_properties();
+
+            if (skip_pip) {
+                SPDLOG_WARN("[LocalPlayerSetupViewPoint] post_init_properties SKIPPED by "
+                            "VR_GhostingFixSkipPostInitProperties. The second eye's view state "
+                            "will NOT be allocated - expect broken stereo. Diagnostic only.");
+            } else if (localplayer != nullptr && !IsBadReadPtr(localplayer, sizeof(void*))) try {
                 g_hook->post_init_properties((uintptr_t)localplayer);
             } catch(...) {
                 SPDLOG_ERROR("[LocalPlayerSetupViewPoint] Failed to post init properties");
