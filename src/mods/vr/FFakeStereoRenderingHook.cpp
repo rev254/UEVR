@@ -5705,6 +5705,38 @@ uint32_t FFakeStereoRenderingHook::get_desired_number_of_views_hook(FFakeStereoR
             g_hook->m_sceneview_data.known_scene_states.size() < 2 && g_hook->m_fixed_localplayer_view_count &&
             !!g_hook->m_sceneview_data.constructor_hook && g_hook->m_has_view_extensions_installed)
         {
+            // =============================================================
+            // THE BOOTSTRAP, AND THE SWITCH THAT REFUSES IT. (2026-08-10)
+            //
+            // Returning 2 here is what makes the engine build a second view,
+            // which is the only way this fix ever learns the second eye's
+            // scene state. It is also, on the evidence, the trigger for
+            // Jedi Survivor's render-thread spin.
+            //
+            // What ruled everything else out: with the swap block fully
+            // gated off (settled=false, PRIMARY never forced, nothing
+            // touched), the game STILL hung one frame after the second
+            // scene state appeared. So neither the swap nor the stereo pass
+            // is the cause - the mere existence of the second view is.
+            //
+            // That also reconciles a contradiction sitting in the notes for
+            // weeks: 2026-07-25 found that TRUNCATING the count to 1 hung
+            // the render thread, and 2026-08-10 found that LEAVING it at 2
+            // hangs it too. Both are true, and both follow from Survivor
+            // not tolerating a second view under AFR at all - whatever the
+            // count is afterwards is beside the point.
+            //
+            // With this on, Ghosting Fix can still be enabled but never
+            // learns a second scene state, so the swap can never fire and
+            // the fix does nothing useful. It is a DIAGNOSTIC, not a fix:
+            // it answers "is view creation the trigger?" and nothing else.
+            if (vr->is_ghosting_fix_suppress_bootstrap()) {
+                SPDLOG_INFO_ONCE("[GhostingFixTrace] bootstrap SUPPRESSED - returning 1 view. "
+                                 "The second scene state will never be learned and the swap "
+                                 "can never fire. Diagnostic only.");
+                return 1;
+            }
+
             // Only works correctly if view extensions are installed, so we can reset the view count to 1 without crashing
             return 2;
         }

@@ -3039,6 +3039,11 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
         m_enable_depth->draw("Enable Depth-based Latency Reduction");
         m_load_blueprint_code->draw("Load Blueprint Code");
         m_ghosting_fix->draw("Ghosting Fix");
+        m_ghosting_fix_suppress_bootstrap->draw("Ghosting Fix: suppress the 2-view bootstrap (DIAGNOSTIC)");
+        ImGui::TextWrapped("Never ask the engine for a second view, so the second eye's scene state "
+                           "is never learned and the swap can never fire. Ghosting is NOT fixed with "
+                           "this on - it exists to test whether creating the second view is what "
+                           "hangs the render thread.");
         m_ghosting_fix_stable_frames->draw("Ghosting Fix: frames to settle before swapping");
         ImGui::TextWrapped("Wait this many frames after both eyes' scene states are known before "
                            "starting to swap them. 0 = swap immediately (the old behaviour, which "
