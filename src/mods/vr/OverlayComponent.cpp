@@ -225,6 +225,7 @@ void OverlayComponent::on_draw_ui() {
         m_ui_follows_view->draw("UI Follows View");
         ImGui::SameLine();
         m_ui_invert_alpha->draw("UI Invert Alpha");
+        m_ui_lock_on_show->draw("UI Lock On Show");
 
         m_framework_distance->draw("Framework Distance");
         m_framework_size->draw("Framework Size");
@@ -807,14 +808,63 @@ void OverlayComponent::update_overlay_openvr() {
     }
 }
 
+// UI_LockOnShow: freeze the slate where the player was looking on the frame it
+// appeared. Captured once, on the rising edge, and held until the slate is
+// hidden again - see the toggle's note in the header for why neither existing
+// mode works for a roomscale 6DOF game.
+glm::mat4 OverlayComponent::OpenXR::get_locked_slate_matrix() {
+    auto& vr = VR::get();
+
+    // DO NOT LATCH BEFORE THE HMD IS LIVE, and do not capture a pose from a
+    // runtime that has not finished coming up.
+    //
+    // UI_LockOnShow and VR_2DScreenMode both PERSIST IN config.txt. A session
+    // that exits with a map or cutscene open leaves them set, so the next launch
+    // starts with the slate already showing and this function running during
+    // early setup - before the tracking system can answer. That crashed on
+    // injection, repeatably, and survived a full reboot because the cause was a
+    // config file rather than anything in memory.
+    //
+    // Returning identity without latching is the right failure: the slate lands
+    // at the stage origin for a frame or two and then captures properly the
+    // moment tracking is live, rather than taking the process down.
+    if (!vr->is_hmd_active()) {
+        return glm::identity<glm::mat4>();
+    }
+
+    if (!m_slate_pose_locked) {
+        m_slate_pose_locked = true;
+
+        // Yaw only. A head tilted at the moment of capture must not leave the
+        // screen canted for the whole scene, and pitch would put a cutscene on
+        // the floor or the ceiling for anyone who looked down as it started.
+        const auto hmd_rotation = glm::quat{vr->get_rotation(0)};
+        m_locked_slate_matrix = Matrix4x4f{utility::math::flatten(hmd_rotation)};
+
+        // get_position(0) is the HMD in the same space m_standing_origin is
+        // sampled from (VR.cpp: m_standing_origin = get_position(0)), which is
+        // the space the non-following branch below builds in - so this matrix
+        // drops straight into stage_space with no conversion.
+        m_locked_slate_matrix[3] = vr->get_position(0);
+        m_locked_slate_matrix[3].w = 1.0f;
+    }
+
+    return m_locked_slate_matrix;
+}
+
 std::optional<std::reference_wrapper<XrCompositionLayerQuad>> OverlayComponent::OpenXR::generate_slate_quad(
-    runtimes::OpenXR::SwapchainIndex swapchain, 
-    XrEyeVisibility eye) 
+    runtimes::OpenXR::SwapchainIndex swapchain,
+    XrEyeVisibility eye)
 {
     auto& vr = VR::get();
 
     if (!vr->is_gui_enabled()) {
         m_parent->m_intersect_state.intersecting = false;
+        // The slate is gone, so the next time one appears it is a NEW show and
+        // must re-capture. Without this the first lock would persist for the
+        // rest of the session and every later cutscene would open facing
+        // wherever the player stood for the first one.
+        m_slate_pose_locked = false;
         return std::nullopt;
     }
 
@@ -838,7 +888,13 @@ std::optional<std::reference_wrapper<XrCompositionLayerQuad>> OverlayComponent::
 
     auto glm_matrix = glm::identity<glm::mat4>();
 
-    if (vr->m_overlay_component.m_ui_follows_view->value()) {
+    if (vr->m_overlay_component.m_ui_lock_on_show->value()) {
+        // Checked before UI_FollowView: locking is the stronger statement, and a
+        // profile that wants a locked cutscene screen should not also have to
+        // remember to turn following off.
+        glm_matrix = get_locked_slate_matrix();
+        layer.space = vr->m_openxr->stage_space;
+    } else if (vr->m_overlay_component.m_ui_follows_view->value()) {
         layer.space = vr->m_openxr->view_space;
     } else {
         auto rotation_offset = glm::inverse(vr->get_rotation_offset());
@@ -916,12 +972,15 @@ std::optional<std::reference_wrapper<XrCompositionLayerQuad>> OverlayComponent::
 }
 
 std::optional<std::reference_wrapper<XrCompositionLayerCylinderKHR>> OverlayComponent::OpenXR::generate_slate_cylinder(
-    runtimes::OpenXR::SwapchainIndex swapchain, 
-    XrEyeVisibility eye) 
+    runtimes::OpenXR::SwapchainIndex swapchain,
+    XrEyeVisibility eye)
 {
     auto& vr = VR::get();
 
     if (!vr->is_gui_enabled()) {
+        // Same unlock as the quad path - only one of the two runs at a time, and
+        // whichever one it is has to be able to see the slate go away.
+        m_slate_pose_locked = false;
         return std::nullopt;
     }
 
@@ -945,7 +1004,13 @@ std::optional<std::reference_wrapper<XrCompositionLayerCylinderKHR>> OverlayComp
     
     auto glm_matrix = glm::identity<glm::mat4>();
 
-    if (vr->m_overlay_component.m_ui_follows_view->value()) {
+    if (vr->m_overlay_component.m_ui_lock_on_show->value()) {
+        // Checked before UI_FollowView: locking is the stronger statement, and a
+        // profile that wants a locked cutscene screen should not also have to
+        // remember to turn following off.
+        glm_matrix = get_locked_slate_matrix();
+        layer.space = vr->m_openxr->stage_space;
+    } else if (vr->m_overlay_component.m_ui_follows_view->value()) {
         layer.space = vr->m_openxr->view_space;
     } else {
         auto rotation_offset = glm::inverse(vr->get_rotation_offset());

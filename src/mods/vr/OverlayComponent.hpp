@@ -106,6 +106,23 @@ private:
     const ModSlider::Ptr m_slate_size{ ModSlider::create("UI_Size", 0.5f, 10.0f, 2.0f) };
     const ModSlider::Ptr m_slate_cylinder_angle{ ModSlider::create("UI_Cylinder_Angle", 0.0f, 360.0f, 90.0f) };
     const ModToggle::Ptr m_ui_follows_view{ ModToggle::create("UI_FollowView", false) };
+
+    // Freeze the slate where the player was looking the first frame it appeared,
+    // and leave it there until it is hidden again.
+    //
+    // The two existing modes both fail for a roomscale 6DOF game. UI_FollowView
+    // on glues the slate to the headset, so it can never be looked away from -
+    // fine for a menu, wrong for a cutscene, which is a shot the player should be
+    // able to look around. UI_FollowView off anchors to the standing origin and
+    // the world rotation offset, so the slate appears wherever play-space forward
+    // happens to be - which in a 6DOF mod is nowhere in particular, because the
+    // player has been walking and turning around the room since the last recentre.
+    //
+    // Locking on show is what "put a screen in front of me and leave it there"
+    // actually means. Yaw only, via utility::math::flatten: a head tilted at the
+    // moment of capture should not leave the screen canted for the whole scene.
+    const ModToggle::Ptr m_ui_lock_on_show{ ModToggle::create("UI_LockOnShow", false) };
+
     const ModToggle::Ptr m_ui_invert_alpha{ ModToggle::create("UI_InvertAlpha", false) };
 
     const ModSlider::Ptr m_framework_distance{ ModSlider::create("UI_Framework_Distance", 0.5f, 10.0f, 1.75f) };
@@ -126,6 +143,7 @@ public:
             *m_slate_size,
             *m_slate_cylinder_angle,
             *m_ui_follows_view,
+            *m_ui_lock_on_show,
             *m_ui_invert_alpha,
             *m_framework_distance,
             *m_framework_size,
@@ -166,7 +184,22 @@ private:
         XrCompositionLayerCylinderKHR m_slate_layer_cylinder_right{};
         XrCompositionLayerQuad m_framework_ui_layer{};
         OverlayComponent* m_parent{ nullptr };
-        
+
+        // UI_LockOnShow state. Captured on the rising edge of the slate being
+        // generated and cleared when it stops, so "show" means show rather than
+        // "every frame the player happens to be looking somewhere new".
+        //
+        // Shared by the quad and cylinder paths deliberately: they are two
+        // presentations of the same slate and only one is ever active, so locking
+        // them independently would re-capture the pose if the overlay type were
+        // changed mid-scene.
+        bool m_slate_pose_locked{ false };
+        glm::mat4 m_locked_slate_matrix{ glm::identity<glm::mat4>() };
+
+        // Both generators call this. Returns the frozen matrix, capturing it
+        // first if this is the frame the slate appeared on.
+        glm::mat4 get_locked_slate_matrix();
+
         friend class OverlayComponent;
     } m_openxr;
 
