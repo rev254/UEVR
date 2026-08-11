@@ -3217,15 +3217,52 @@ sdk::FSceneView* FFakeStereoRenderingHook::sceneview_constructor(sdk::FSceneView
     // the next in another capture, and a backwards step underflows the unsigned
     // subtraction to ~2^32. Same failure, both directions.
     //
-    // VR's render frame count is monotonic and ours, which is what a recency
-    // window actually needs.
-    const uint32_t recency_now = (uint32_t)VR::get()->get_render_frame_count();
+    // MEASURED IN MILLISECONDS, NOT FRAMES. This is the second half of the fix
+    // and the first half was incomplete in a way that produced exactly the same
+    // symptom it was meant to cure.
+    //
+    // The first version replaced g_frame_count with VR::get_render_frame_count(),
+    // which is monotonic - correct, and necessary. But that counter runs at
+    // roughly 7000/sec, not 60, while every window compared against it was
+    // written for a ~60-90 Hz clock. So the 90-unit staleness window silently
+    // became THIRTEEN MILLISECONDS.
+    //
+    // Captured 2026-08-10, a launch with the "fixed" build:
+    //
+    //   known=2 eye0=22ab74624a0 eye1=0 swapped=false settled=true paired_frame=1
+    //
+    // Both states known, and eye1 STILL null 54,000 frames later. The second
+    // state is inserted once at startup and then never refreshed - the refresh
+    // below only touches states the engine actually uses, and with the view
+    // count truncated to 1 (which AFW requires) only the first one ever is. So
+    // its age grows without bound and past 13 ms every candidate search rejects
+    // it. The deferral makes the search eligible at ~1.7 ms, leaving an ~11 ms
+    // window at startup in which a true_index == 1 construction has to land.
+    // Sometimes it does. That is the launch that worked, and it is why this
+    // looked intermittent rather than broken.
+    //
+    // A wall clock says what was always meant: "seen in the last second and a
+    // half". It cannot be knocked out of calibration by a frame counter's rate,
+    // which is the whole class of bug that produced both this and the
+    // g_frame_count original.
+    static const auto recency_epoch = std::chrono::steady_clock::now();
+    // +1 so this is never 0: states_paired_frame uses 0 as its "not yet paired"
+    // sentinel, and a genuine timestamp of 0 on the first frame would read as
+    // unpaired forever.
+    const uint32_t recency_now = 1 + (uint32_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - recency_epoch).count();
 
-    // A counter that went backwards tells us nothing about age, so treat that
-    // as just-seen rather than infinitely old.
+    // A clock that went backwards tells us nothing about age, so treat that as
+    // just-seen rather than infinitely old.
     const auto frame_age = [](uint32_t now, uint32_t then) -> uint32_t {
         return now >= then ? (now - then) : 0;
     };
+
+    // What "recently" means, in milliseconds. 1500 reproduces the intent of the
+    // original 90 frames at 60 fps - long enough that a live scene state is
+    // never mistaken for a dead one, short enough to still exclude a genuinely
+    // destroyed state and the use-after-free that motivated the window.
+    constexpr uint32_t RECENCY_WINDOW_MS = 1500;
 
     bool new_scene_state_inserted_this_frame = false;
 
@@ -3272,9 +3309,10 @@ sdk::FSceneView* FFakeStereoRenderingHook::sceneview_constructor(sdk::FSceneView
         if (known_scene_states.size() >= 2) {
             if (paired_frame == 0) {
                 paired_frame = recency_now;
-                SPDLOG_INFO("[GhostingFixTrace] both scene states known at frame {} - "
-                            "holding off the swap for {} frames",
-                            paired_frame, vr->get_ghosting_fix_stable_frames());
+                SPDLOG_INFO("[GhostingFixTrace] both scene states known at t={}ms - "
+                            "holding off the swap for {} frames ({}ms)",
+                            paired_frame, vr->get_ghosting_fix_stable_frames(),
+                            vr->get_ghosting_fix_stable_frames() * 16);
             }
         } else {
             // Lost one (level load, viewport change). Start the wait over
@@ -3288,7 +3326,15 @@ sdk::FSceneView* FFakeStereoRenderingHook::sceneview_constructor(sdk::FSceneView
         if (paired_frame == 0) {
             return false;
         }
-        return frame_age(recency_now, paired_frame) >= vr->get_ghosting_fix_stable_frames();
+        // The setting stays in FRAMES because that is what it is called and what
+        // existing profiles contain; the clock is now milliseconds, so it is
+        // converted here at a nominal 60 fps rather than silently meaning
+        // "12 milliseconds". Same bug as the staleness window, one line over -
+        // when the clock's unit changed, every constant compared against it
+        // changed meaning too.
+        constexpr uint32_t MS_PER_NOMINAL_FRAME = 16;
+        return frame_age(recency_now, paired_frame)
+               >= (vr->get_ghosting_fix_stable_frames() * MS_PER_NOMINAL_FRAME);
     }();
 
     if (init_options_scene_state != nullptr && !new_scene_state_inserted_this_frame && vr->is_ghosting_fix_enabled() && !known_scene_states.empty() && vr->is_using_afr() && true_index == 1 && ghosting_fix_states_settled) {
@@ -3302,7 +3348,7 @@ sdk::FSceneView* FFakeStereoRenderingHook::sceneview_constructor(sdk::FSceneView
         // false due to array-to-pointer decay), so this reset branch never actually
         // fired on "never initialized" - it silently relied on the 90-frame staleness
         // check alone. Now correctly checks the first slot's value.
-        } else if (eye_pair.eye_state[0] == nullptr || frame_age(recency_now, eye_pair.last_seen_frame) > 90) {
+        } else if (eye_pair.eye_state[0] == nullptr || frame_age(recency_now, eye_pair.last_seen_frame) > RECENCY_WINDOW_MS) {
             eye_pair.eye_state[0] = init_options_scene_state;
             eye_pair.eye_state[1] = nullptr;
         }
@@ -3339,9 +3385,9 @@ sdk::FSceneView* FFakeStereoRenderingHook::sceneview_constructor(sdk::FSceneView
 
             for (auto& [scene_state, last_seen_frame] : known_scene_states) {
                 if (scene_state == init_options_scene_state) { trace_rejected_same++; }
-                else if (frame_age(recency_now, last_seen_frame) > 90) { trace_rejected_stale++; }
+                else if (frame_age(recency_now, last_seen_frame) > RECENCY_WINDOW_MS) { trace_rejected_stale++; }
 
-                if (scene_state != init_options_scene_state && frame_age(recency_now, last_seen_frame) <= 90) {
+                if (scene_state != init_options_scene_state && frame_age(recency_now, last_seen_frame) <= RECENCY_WINDOW_MS) {
                     trace_found_candidate = true;
                     // Defense in depth: set_scene_state() itself almost certainly just
                     // stores the pointer value (a plain assignment can't fault), so this
