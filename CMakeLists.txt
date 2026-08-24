@@ -424,6 +424,49 @@ target_link_libraries(example_plugin PUBLIC
 unset(CMKR_TARGET)
 unset(CMKR_SOURCES)
 
+# Target perf_lod_plugin
+set(CMKR_TARGET perf_lod_plugin)
+set(perf_lod_plugin_SOURCES "")
+
+list(APPEND perf_lod_plugin_SOURCES
+	"examples/perf_lod_plugin/FrameProfiler.cpp"
+	"examples/perf_lod_plugin/PerfCommon.cpp"
+	"examples/perf_lod_plugin/Plugin.cpp"
+	"examples/perf_lod_plugin/SimLod.cpp"
+	"examples/perf_lod_plugin/FrameProfiler.hpp"
+	"examples/perf_lod_plugin/PerfCommon.hpp"
+	"examples/perf_lod_plugin/SimLod.hpp"
+)
+
+list(APPEND perf_lod_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${perf_lod_plugin_SOURCES})
+add_library(perf_lod_plugin SHARED)
+
+if(perf_lod_plugin_SOURCES)
+	target_sources(perf_lod_plugin PRIVATE ${perf_lod_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${perf_lod_plugin_SOURCES})
+
+target_compile_features(perf_lod_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(perf_lod_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(perf_lod_plugin PUBLIC
+	plugin_renderlib
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
 # Target sdk-test
 set(CMKR_TARGET sdk-test)
 set(sdk-test_SOURCES "")
